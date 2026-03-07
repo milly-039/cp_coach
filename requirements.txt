@@ -1,3 +1,4 @@
 boto3
 pinecone
 python-dotenv
+pandas
