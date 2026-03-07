@@ -1,1 +1,1 @@
-{"errorType":"Runtime.InvalidEntrypoint","errorMessage":"RequestId: 21699856-3fd0-4c7a-976a-8e5fd4c6f014 Error: exec: \"query_coach.handler\": executable file not found in $PATH"}
+{"errorType":"Runtime.InvalidEntrypoint","errorMessage":"RequestId: 10874f11-1dc6-4f79-bebf-425db853d4e0 Error: exec: \"query_coach.lambda_handler\": executable file not found in $PATH"}
