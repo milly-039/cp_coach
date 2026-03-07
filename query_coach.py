@@ -1,88 +1,75 @@
 import json
 import os
 import boto3
-#it allows us to talk to bedrock without needing to manage credentials directly, as it will use the AWS credentials configured in the environment
 from pinecone import Pinecone
-from dotenv import load_dotenv
 
-if os.path.exists(".env"):
-    load_dotenv()
+# Initialize AWS Bedrock and Pinecone
+bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
+index = pc.Index("cpcoach") # IMPORTANT: Points to the new dataset
 
-def handler(event, context):
+def get_embedding(text):
+    """Converts the user's question into math."""
+    response = bedrock.invoke_model(
+        modelId="amazon.titan-embed-text-v2:0",
+        body=json.dumps({"inputText": text, "dimensions": 1024, "normalize": True})
+    )
+    return json.loads(response['body'].read())['embedding']
+
+def ask_ai(prompt_text):
+    """Sends the context and question to the Amazon Nova Lite model."""
+    response = bedrock.invoke_model(
+        modelId="amazon.nova-lite-v1:0",
+        body=json.dumps({
+            "messages": [{"role": "user", "content": [{"text": prompt_text}]}],
+            "system": [{"text": "You are a world-class Competitive Programming Coach. You help students understand LeetCode problems."}],
+            "inferenceConfig": {"max_new_tokens": 1000, "temperature": 0.5}
+        })
+    )
+    return json.loads(response['body'].read())['output']['message']['content'][0]['text']
+
+def lambda_handler(event, context):
+    """The main engine that AWS Lambda triggers."""
     try:
-        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        # UPDATE 1: Your specific CP database
-        index = pc.Index("cp-coach")
-        
-        region = os.getenv("MY_AWS_REGION", "us-east-1")
-        bedrock_boto = boto3.client(service_name="bedrock-runtime", region_name=region)
+        # 1. Parse the incoming web request
+        body = json.loads(event.get("body", "{}"))
+        question = body.get("question", "How do I optimize a nested for-loop?")
 
-        # Handle both API Gateway/Function URL formats and direct CLI invokes
-        body_str = event.get("body", "{}")
-        if isinstance(body_str, dict):
-            body = body_str
-        else:
-            body = json.loads(body_str)
-            
-        # UPDATE 2: Relevant CP fallback question
-        question = body.get("question", "I am getting a TLE on my graph traversal, what data structure should I use?")
-
-        # 1. Embed using Titan V2
-        emb_res = bedrock_boto.invoke_model(
-            modelId="amazon.titan-embed-text-v2:0", 
-            body=json.dumps({
-                "inputText": question,
-                "dimensions": 1024,
-                "normalize": True
-            })
+        # 2. Convert question to vector and search Pinecone
+        vector = get_embedding(question)
+        search_results = index.query(
+            vector=vector, 
+            top_k=3, 
+            include_metadata=True
         )
-        query_embedding = json.loads(emb_res['body'].read())['embedding']
 
-        # 2. Query Pinecone
-        results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-        context_text = "\n".join([res['metadata']['text'] for res in results['matches']])
+        # 3. Extract the LeetCode context
+        context_text = ""
+        for match in search_results.get("matches", []):
+            context_text += match["metadata"].get("text", "") + "\n\n"
 
-        # UPDATE 3: The strict CP Coach System Instructions
-        system_prompt = """You are an elite competitive programming coach. Your goal is to help students learn, NOT to do the work for them.
-        Read the provided context (problem editorials and hints). 
-        When a student asks a question:
-        1. Provide conceptual hints, point out logic flaws, or discuss time complexity and appropriate data structures.
-        2. UNDER NO CIRCUMSTANCES are you allowed to write or output the final C++, Python, or Java solution code. 
-        3. If the context does not contain the answer, rely on standard algorithm principles to guide them."""
-        
-        user_prompt = f"Context from Editorials:\n{context_text}\n\nStudent Question:\n{question}"
-        
-        # 3. Generate Answer using Native Nova Lite
-        gen_res = bedrock_boto.converse(
-            modelId="amazon.nova-lite-v1:0",
-            system=[{"text": system_prompt}], # Injecting the strict rules here
-            messages=[{
-                "role": "user",
-                "content": [{"text": user_prompt}]
-            }],
-            inferenceConfig={
-                "maxTokens": 512,
-                "temperature": 0.3 # Kept low so it stays analytical and mathematically precise
-            }
+        # 4. The Strict Coach Prompt
+        final_prompt = (
+            f"Here is the context of the LeetCode problem(s) the student is asking about:\n"
+            f"<context>\n{context_text}\n</context>\n\n"
+            f"Student's Question: {question}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"1. Do not give the exact code solution right away. Act as a coach.\n"
+            f"2. Give a conceptual hint.\n"
+            f"3. Mention the optimal Time and Space complexity they should aim for.\n"
+            f"4. Ask them if they want the full solution after they try."
         )
-        
-        answer = gen_res['output']['message']['content'][0]['text']
+
+        # 5. Generate Answer
+        answer = ask_ai(final_prompt)
 
         return {
             "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
             "body": json.dumps({"answer": answer})
         }
 
     except Exception as e:
         return {
             "statusCode": 500,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
             "body": json.dumps({"error": str(e)})
         }
