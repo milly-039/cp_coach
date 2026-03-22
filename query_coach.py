@@ -2,6 +2,7 @@ import json
 import os
 import boto3
 import time
+import urllib.request
 from pinecone import Pinecone
 
 # Initialize Cloud Clients
@@ -10,6 +11,7 @@ pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index = pc.Index("cpcoach")
 
 def get_embedding(text):
+    """Still uses AWS Titan to convert the user's question into vector numbers for Pinecone."""
     response = bedrock.invoke_model(
         modelId="amazon.titan-embed-text-v2:0",
         body=json.dumps({"inputText": text, "dimensions": 1024, "normalize": True})
@@ -17,15 +19,23 @@ def get_embedding(text):
     return json.loads(response['body'].read())['embedding']
 
 def ask_ai(prompt_text):
-    response = bedrock.invoke_model(
-        modelId="amazon.nova-lite-v1:0",
-        body=json.dumps({
-            "messages": [{"role": "user", "content": [{"text": prompt_text}]}],
-            "system": [{"text": "You are a Competitive Programming Coach. Give conceptual hints and time complexities. Do NOT write the exact code solution."}],
-            "inferenceConfig": {"max_new_tokens": 1000, "temperature": 0.5}
-        })
-    )
-    return json.loads(response['body'].read())['output']['message']['content'][0]['text']
+    """Sends the Pinecone context to Ishanvi's Custom Brain on Modal instead of Nova."""
+    url = "https://ishanvi039--ishanvi-cp-coach-cpcoachbrain-generate-hint.modal.run"
+    
+    # Package the prompt into JSON
+    payload = json.dumps({"prompt": prompt_text}).encode('utf-8')
+    headers = {'Content-Type': 'application/json'}
+    
+    # Create the HTTP Request
+    req = urllib.request.Request(url, data=payload, headers=headers)
+    
+    try:
+        # We set a 60-second timeout because Serverless GPUs sometimes take 5-10 seconds to "wake up" (cold start)
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            return result.get("answer", "Error: Brain returned an empty response.")
+    except Exception as e:
+        return f"Coach Brain Connection Error: {str(e)}"
 
 def lambda_handler(event, context):
     try:
@@ -46,7 +56,7 @@ def lambda_handler(event, context):
             context_text += match["metadata"].get("text", "") + "\n\n"
             problem_titles.append(match["metadata"].get("title", "Unknown"))
 
-        # RAG Step 3: Generate Response
+        # RAG Step 3: Generate Response using the Custom LLM
         final_prompt = f"Context:\n{context_text}\n\nStudent: {question}\n\nProvide a conceptual hint."
         answer = ask_ai(final_prompt)
         
